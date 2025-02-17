@@ -1,6 +1,5 @@
-import os
-import tiktoken
 import typing as t
+from pydantic_ai import Agent
 from langchain_openai import ChatOpenAI
 from langchain.prompts import ChatPromptTemplate
 from langchain.schema.output_parser import StrOutputParser
@@ -41,12 +40,8 @@ Content:
 
 
 @observe()
-def prepare_report(goal: str, scraped: list[str], model: str, temperature: float, api_key: SecretStr | None = None) -> str:
-    if api_key == None:
-        api_key = APIKeys().openai_api_key
-        
-    evaluation_prompt_template = """
-    You are a professional researcher. Your goal is to provide a relevant information report
+def prepare_report(goal: str, scraped: list[str], agent: Agent) -> str:
+    evaluation_prompt_template = """You are a professional researcher. Your goal is to provide a relevant information report
     in order to make an informed prediction for the question: '{goal}'.
     
     Here are the results of relevant web searches:
@@ -66,17 +61,7 @@ def prepare_report(goal: str, scraped: list[str], model: str, temperature: float
     Don't limit yourself to just stating each finding; provide a thorough, full and comprehensive analysis of each finding.
     Use markdown syntax. Include as much relevant information as possible and try not to summarize.
     """
-    evaluation_prompt = ChatPromptTemplate.from_template(template=evaluation_prompt_template)
-
-    research_evaluation_chain = (
-        evaluation_prompt |
-        ChatOpenAI(model=model, temperature=temperature, api_key=secretstr_to_v1_secretstr(api_key)) |
-        StrOutputParser()
-    )
-
-    response: str = research_evaluation_chain.invoke({
-        "search_results": scraped,
-        "goal": goal
-    }, config=get_langfuse_langchain_config())
+    result = agent.run_sync(evaluation_prompt_template.format(goal=goal, search_results="\n".join(scraped)))
+    response = result.data
 
     return response

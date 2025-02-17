@@ -11,6 +11,8 @@ from prediction_prophet.functions.scrape_results import scrape_results
 from prediction_prophet.functions.search import search
 from pydantic.types import SecretStr
 from pydantic import BaseModel
+from pydantic_ai import Agent
+from pydantic_ai.settings import ModelSettings
 from prediction_market_agent_tooling.tools.langfuse_ import observe
 
 if t.TYPE_CHECKING:
@@ -36,9 +38,8 @@ class NotEnoughScrapedSitesError(ValueError):
 @observe()
 def research(
     goal: str,
-    use_summaries: bool,
-    model: str = "gpt-4-0125-preview",
-    temperature: float = 0.7,
+    use_summaries: bool = False,
+    agent: Agent | None = None,
     initial_subqueries_limit: int = 20,
     subqueries_limit: int = 4,
     max_results_per_search: int = 5,
@@ -58,15 +59,17 @@ def research(
             f"equal to max_results_per_search ({max_results_per_search}) * "
             f"subqueries_limit ({subqueries_limit})."
         )
+    
+    agent = agent or Agent("gpt-4o", model_settings=ModelSettings(temperature=0.7))
 
     logger.info("Started subqueries generation")
-    all_queries = generate_subqueries(query=goal, limit=initial_subqueries_limit, model=model, temperature=temperature, api_key=openai_api_key)
+    all_queries = generate_subqueries(query=goal, limit=initial_subqueries_limit, agent=agent)
     
     stringified_queries = '\n- ' + '\n- '.join(all_queries)
     logger.info(f"Generated subqueries: {stringified_queries}")
     
     logger.info("Started subqueries reranking")
-    queries = rerank_subqueries(queries=all_queries, goal=goal, model=model, temperature=temperature, api_key=openai_api_key)[:subqueries_limit] if initial_subqueries_limit > subqueries_limit else all_queries
+    queries = rerank_subqueries(queries=all_queries, goal=goal, agent=agent)[:subqueries_limit] if initial_subqueries_limit > subqueries_limit else all_queries
 
     stringified_queries = '\n- ' + '\n- '.join(queries)
     logger.info(f"Reranked subqueries. Will use top {subqueries_limit}: {stringified_queries}")
@@ -151,7 +154,7 @@ def research(
         logger.info(f"Information summarized")
 
     logger.info(f"Started preparing report")
-    report = prepare_report(goal, vector_result_texts, model=model, temperature=temperature, api_key=openai_api_key)
+    report = prepare_report(goal, vector_result_texts, agent=agent)
     logger.info(f"Report prepared")
     logger.info(report)
 

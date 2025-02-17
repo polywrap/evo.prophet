@@ -25,7 +25,7 @@ class RephrasedQuestion(BaseModel):
 
 def rephrase_question(
     question: str,
-    engine: str = "gpt-4-0125-preview"
+    engine: str = "gpt-4o"
 ) -> RephrasedQuestion:
     """
     Rephrase the original question, by asking it in negation and universally, for example:

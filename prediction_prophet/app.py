@@ -1,12 +1,11 @@
 import time
-from typing import cast
 from prediction_prophet.benchmark.agents import _make_prediction
-from prediction_prophet.functions.is_predictable_and_binary import is_predictable_and_binary
-from prediction_market_agent_tooling.benchmark.utils import (
-    OutcomePrediction
-)
+from prediction_market_agent_tooling.tools.is_predictable import is_predictable_binary
 from pydantic import SecretStr
 import streamlit as st
+from pydantic_ai import Agent
+from pydantic_ai.models import KnownModelName
+from pydantic_ai.settings import ModelSettings
 from prediction_market_agent_tooling.tools.utils import secret_str_from_env
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from prediction_prophet.functions.create_embeddings_from_results import create_embeddings_from_results
@@ -19,7 +18,7 @@ from prediction_prophet.functions.search import search
 def research(
     goal: str,
     tavily_api_key: SecretStr,
-    model: str = "gpt-4-0125-preview",
+    model: KnownModelName = "gpt-4o",
     temperature: float = 0.7, 
     initial_subqueries_limit: int = 20,
     subqueries_limit: int = 4,
@@ -27,14 +26,16 @@ def research(
     scrape_content_split_chunk_overlap: int = 225,
     top_k_per_query: int = 8
 ) -> str:
+    agent = Agent(model=model, model_settings=ModelSettings(temperature=temperature))
+
     with st.status("Generating subqueries"):
-        queries = generate_subqueries(query=goal, limit=initial_subqueries_limit, model=model, temperature=temperature)
+        queries = generate_subqueries(query=goal, limit=initial_subqueries_limit, agent=agent)
     
         stringified_queries = '\n- ' + '\n- '.join(queries)
         st.write(f"Generated subqueries: {stringified_queries}")
         
     with st.status("Reranking subqueries"):
-        queries = rerank_subqueries(queries=queries, goal=goal, model=model, temperature=temperature)[:subqueries_limit] if initial_subqueries_limit > subqueries_limit else queries
+        queries = rerank_subqueries(queries=queries, goal=goal, agent=agent)[:subqueries_limit] if initial_subqueries_limit > subqueries_limit else queries
 
         stringified_queries = '\n- ' + '\n- '.join(queries)
         st.write(f"Reranked subqueries. Will use top {subqueries_limit}: {stringified_queries}")
@@ -86,7 +87,7 @@ def research(
         st.write(f"Found {len(vector_result_texts)} relevant information chunks")
 
     with st.status(f"Preparing report"):
-        report = prepare_report(goal, vector_result_texts, model=model, temperature=temperature)
+        report = prepare_report(goal, vector_result_texts, agent=agent)
         st.markdown(report)
 
     return report
@@ -131,9 +132,9 @@ if question := st.chat_input(placeholder='Will Twitter implement a new misinform
             st.write(f"I will evaluate the probability of '{question}' occurring")
             
             with st.status("Evaluating question") as status:
-                (is_predictable, reasoning) = is_predictable_and_binary(question=question) 
+                is_predictable = is_predictable_binary(question=question) 
                 if not is_predictable:
-                    st.container().error(f"The agent thinks this question is not predictable: \n\n{reasoning}")
+                    st.container().error(f"The agent thinks this question is not predictable.")
                     status.update(label="Error evaluating question", state="error", expanded=True)
                     st.stop()
             
@@ -141,17 +142,17 @@ if question := st.chat_input(placeholder='Will Twitter implement a new misinform
                 goal=question,
                 subqueries_limit=6,
                 top_k_per_query=15,
-                tavily_api_key=cast(SecretStr, tavily_api_key),
+                tavily_api_key=tavily_api_key,
             )
                     
             with st.status("Making prediction"):
-                prediction = _make_prediction(market_question=question, additional_information=report, engine="gpt-4-0125-preview", temperature=0.0)
+                prediction = _make_prediction(market_question=question, additional_information=report, agent=Agent("gpt-4o", model_settings=ModelSettings(temperature=0.0)))
 
                 if prediction.outcome_prediction == None:
                     st.container().error("The agent failed to generate a prediction")
                     st.stop()
                 
-                outcome_prediction = cast(OutcomePrediction, prediction.outcome_prediction)
+                outcome_prediction = prediction.outcome_prediction
             
                 st.write(f"Probability: {outcome_prediction.p_yes * 100}%. Confidence: {outcome_prediction.confidence * 100}%")
                 if outcome_prediction.reasoning:

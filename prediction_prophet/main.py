@@ -40,7 +40,7 @@ def research(
     start = time.time()
     
     with get_openai_callback() as cb:
-      research = prophet_research(goal=prompt, use_summaries=False, model="gpt-4-0125-preview")
+      research = prophet_research(goal=prompt)
     
     report = research.report
     end = time.time()
@@ -67,7 +67,7 @@ def predict(prompt: str, path: str | None = None) -> None:
         else:
             logger = logging.getLogger("research")
             logger.setLevel(logging.INFO)
-            report = prophet_research(goal=prompt, model="gpt-4-0125-preview", use_summaries=False, logger=logger).report
+            report = prophet_research(goal=prompt, logger=logger).report
         
         prediction = make_debated_prediction(prompt=prompt, additional_information=report)
 

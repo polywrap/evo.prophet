@@ -7,6 +7,7 @@ from prediction_market_agent_tooling.benchmark.agents import (
 from prediction_market_agent_tooling.benchmark.utils import (
     Prediction,
 )
+from pydantic_ai import Agent
 from datetime import datetime
 from prediction_prophet.autonolas.research import EmbeddingModel
 from prediction_prophet.autonolas.research import make_prediction, get_urls_from_queries
@@ -22,7 +23,6 @@ from prediction_market_agent_tooling.benchmark.utils import (
     OutcomePrediction,
     Prediction,
 )
-from pydantic.types import SecretStr
 from prediction_prophet.autonolas.research import Prediction as LLMCompletionPredictionDict
 from prediction_market_agent_tooling.tools.langfuse_ import observe
 from prediction_market_agent_tooling.tools.is_predictable import is_predictable_binary
@@ -35,10 +35,8 @@ if t.TYPE_CHECKING:
 def _make_prediction(
     market_question: str,
     additional_information: str,
-    engine: str,
-    temperature: float,
+    agent: Agent,
     include_reasoning: bool = False,
-    api_key: SecretStr | None = None,
 ) -> Prediction:
     """
     We prompt model to output a simple flat JSON and convert it to a more structured pydantic model here.
@@ -46,9 +44,7 @@ def _make_prediction(
     prediction = make_prediction(
         prompt=market_question,
         additional_information=additional_information,
-        engine=engine,
-        temperature=temperature,
-        api_key=api_key,
+        agent=agent,
         include_reasoning=include_reasoning,
     )
     return completion_prediction_json_to_pydantic_model(
@@ -67,15 +63,13 @@ def completion_prediction_json_to_pydantic_model(
 class QuestionOnlyAgent(AbstractBenchmarkedAgent):
     def __init__(
         self,
-        model: str,
-        temperature: float = 0.0,
+        agent: Agent,
         agent_name: str = "question-only",
         max_workers: t.Optional[int] = None,
         logger: t.Union[logging.Logger, "Logger"] = logging.getLogger(),
     ):
         super().__init__(agent_name=agent_name, max_workers=max_workers)
-        self.model: str = model
-        self.temperature = temperature
+        self.agent: Agent = agent
         self.logger = logger
 
     def predict(
@@ -85,8 +79,7 @@ class QuestionOnlyAgent(AbstractBenchmarkedAgent):
             return _make_prediction(
                 market_question=market_question,
                 additional_information="",
-                engine=self.model,
-                temperature=self.temperature,
+                agent=self.agent,
             )
         except ValueError as e:
             self.logger.error(f"Error in QuestionOnlyAgent's predict: {e}")
@@ -101,16 +94,16 @@ class QuestionOnlyAgent(AbstractBenchmarkedAgent):
 class OlasAgent(AbstractBenchmarkedAgent):
     def __init__(
         self,
-        model: str,
-        temperature: float = 0.0,
+        research_agent: Agent,
+        prediction_agent: Agent,
         agent_name: str = "olas",
         max_workers: t.Optional[int] = None,
         embedding_model: EmbeddingModel = EmbeddingModel.spacy,
         logger: t.Union[logging.Logger, "Logger"] = logging.getLogger(),
     ):
         super().__init__(agent_name=agent_name, max_workers=max_workers)
-        self.model: str = model
-        self.temperature = temperature
+        self.research_agent = research_agent
+        self.prediction_agent = prediction_agent
         self.embedding_model = embedding_model
         self.logger = logger
 
@@ -125,7 +118,7 @@ class OlasAgent(AbstractBenchmarkedAgent):
     def research(self, market_question: str) -> str:
         return research_autonolas(
             prompt=market_question,
-            engine=self.model,
+            agent=self.research_agent,
             embedding_model=self.embedding_model,
         )
 
@@ -135,8 +128,7 @@ class OlasAgent(AbstractBenchmarkedAgent):
             return _make_prediction(
                 market_question=market_question,
                 additional_information=researched,
-                engine=self.model,
-                temperature=self.temperature,
+                agent=self.prediction_agent,
             )
         except ValueError as e:
             self.logger.error(f"Error in OlasAgent's predict: {e}")
@@ -160,9 +152,8 @@ class OlasAgent(AbstractBenchmarkedAgent):
 class PredictionProphetAgent(AbstractBenchmarkedAgent):
     def __init__(
         self,
-        model: str,
-        research_temperature: float = 0.7,
-        prediction_temperature: float = 0.0,
+        research_agent: Agent,
+        prediction_agent: Agent,
         agent_name: str = "prediction_prophet",
         include_reasoning: bool = False,
         use_summaries: bool = False,
@@ -175,10 +166,9 @@ class PredictionProphetAgent(AbstractBenchmarkedAgent):
         logger: t.Union[logging.Logger, "Logger"] = logging.getLogger(),
     ):
         super().__init__(agent_name=agent_name, max_workers=max_workers)
-        self.model: str = model
+        self.research_agent: Agent = research_agent
+        self.prediction_agent: Agent = prediction_agent
         self.include_reasoning = include_reasoning
-        self.research_temperature = research_temperature
-        self.prediction_temperature = prediction_temperature
         self.use_summaries = use_summaries
         self.use_tavily_raw_content = use_tavily_raw_content
         self.initial_subqueries_limit = initial_subqueries_limit
@@ -198,8 +188,7 @@ class PredictionProphetAgent(AbstractBenchmarkedAgent):
     def research(self, market_question: str) -> Research:
         return prophet_research(
             goal=market_question,
-            model=self.model,
-            temperature=self.research_temperature,
+            agent=self.research_agent,
             use_summaries=self.use_summaries,
             use_tavily_raw_content=self.use_tavily_raw_content,
             initial_subqueries_limit=self.initial_subqueries_limit,
@@ -215,8 +204,7 @@ class PredictionProphetAgent(AbstractBenchmarkedAgent):
             return _make_prediction(
                 market_question=market_question,
                 additional_information=research.report,
-                engine=self.model,
-                temperature=self.prediction_temperature,
+                agent=self.prediction_agent,
                 include_reasoning=self.include_reasoning,
         )
         except (NoResulsFoundError, NotEnoughScrapedSitesError) as e:
@@ -243,15 +231,15 @@ class PredictionProphetAgent(AbstractBenchmarkedAgent):
 class RephrasingOlasAgent(OlasAgent):
     def __init__(
         self,
-        model: str,
-        temperature: float = 0.0,
+        research_agent: Agent,
+        prediction_agent: Agent,
         agent_name: str = "reph-olas",
         max_workers: t.Optional[int] = None,
         embedding_model: EmbeddingModel = EmbeddingModel.spacy,
     ):
         super().__init__(
-            model=model,
-            temperature=temperature,
+            research_agent=research_agent,
+            prediction_agent=prediction_agent,
             embedding_model=embedding_model,
             agent_name=agent_name,
             max_workers=max_workers,

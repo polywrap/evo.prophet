@@ -1,6 +1,5 @@
 
 import os
-import math
 import tenacity
 from datetime import timedelta
 from sklearn.metrics.pairwise import cosine_similarity
@@ -10,6 +9,8 @@ import json
 from dotenv import load_dotenv
 import re
 import gc
+from pydantic_ai import Agent
+from pydantic_ai.settings import ModelSettings
 from concurrent.futures import Future
 from itertools import groupby
 from operator import itemgetter
@@ -25,23 +26,14 @@ import spacy.util
 import spacy.cli
 import tiktoken
 
-from langchain_openai import ChatOpenAI
-from langchain.prompts import ChatPromptTemplate
-from langchain.schema.output_parser import StrOutputParser
 from langchain_openai import OpenAIEmbeddings
 
 from dateutil import parser
 from prediction_prophet.functions.utils import check_not_none
-from prediction_market_agent_tooling.tools.utils import secret_str_from_env
 from prediction_market_agent_tooling.gtypes import Probability
-from prediction_market_agent_tooling.config import APIKeys
 from prediction_market_agent_tooling.tools.caches.db_cache import db_cache
 from prediction_prophet.functions.parallelism import par_map
-from prediction_market_agent_tooling.config import APIKeys
-from pydantic.types import SecretStr
-from prediction_market_agent_tooling.gtypes import secretstr_to_v1_secretstr
-from langfuse.decorators import langfuse_context
-from prediction_market_agent_tooling.tools.langfuse_ import get_langfuse_langchain_config, observe
+from prediction_market_agent_tooling.tools.langfuse_ import observe
 
 load_dotenv()
 
@@ -325,8 +317,6 @@ class EmbeddingModel(Enum):
 
 
 class Prediction(TypedDict):
-    decision: Optional[str]
-    decision_token_prob: Optional[float]
     p_yes: Probability
     p_no: Probability
     confidence: float
@@ -1078,10 +1068,8 @@ def fetch_additional_information(
     event_question: str,
     max_add_words: int,
     nlp: spacy.Language,
+    agent: Agent,
     embedding_model: EmbeddingModel,
-    engine: str = "gpt-3.5-turbo",
-    temperature: float = 0.5,
-    max_compl_tokens: int = 500,
 ) -> str:
     """
     Get urls from a web search and extract relevant information based on an event question.
@@ -1089,10 +1077,7 @@ def fetch_additional_information(
     Args:
         event_question (str): The question related to the event.
         max_add_words (int): The maximum number of words allowed for additional information.
-        temperature (float): The temperature parameter for the engine.
-        engine (str): The openai engine. Defaults to "gpt-3.5-turbo".
-        temperature (float): The temperature parameter for the engine. Defaults to 1.0.
-        max_compl_tokens (int): The maximum number of tokens for the engine's response.
+        agent (Agent): PydanticAI agent.
 
     Returns:
         str: The relevant information fetched from all the URLs concatenated.
@@ -1107,32 +1092,17 @@ def fetch_additional_information(
     #     # return empty additional information if the prompt is flagged
     #     return ""
 
-    # Create messages for the OpenAI engine
-    messages = [
-        ("system", "You are a helpful assistant."),
-        ("user", url_query_prompt),
-    ]
+    # Register system prompt if not already set on the agent
+    if not agent._system_prompts and not agent._system_prompt_functions and not agent._system_prompt_dynamic_functions:
+        agent.system_prompt()(lambda: "You are a helpful assistant.")
 
-    # Fetch queries from the OpenAI engine
-    research_prompt = ChatPromptTemplate.from_messages(messages=messages)
-    research_chain = (
-        research_prompt |
-        ChatOpenAI(
-            model=engine,
-            temperature=temperature,
-            max_tokens=max_compl_tokens,
-            n=1, 
-            timeout=120,
-        ) |
-        StrOutputParser()
-    )
-    response = research_chain.invoke({}, config=get_langfuse_langchain_config())
+    response = agent.run_sync(url_query_prompt).data
 
     # Parse the response content
     try:
         json_data = json.loads(clean_completion_json(response))
     except json.decoder.JSONDecodeError as e:
-        raise ValueError(f"The response from {engine=} could not be parsed as JSON: {response=}") from e
+        raise ValueError(f"The response from {agent=} could not be parsed as JSON: {response=}") from e
 
     # Get URLs from queries
     urls = get_urls_from_queries(
@@ -1159,13 +1129,12 @@ def fetch_additional_information(
 def research(
     prompt: str,
     max_tokens: int | None = None,
-    temperature: float | None = None,
-    engine: str = "gpt-3.5-turbo",
+    agent: Agent | None = None,
     embedding_model: EmbeddingModel = EmbeddingModel.spacy,
 ) -> str:
     prompt = f"\"{prompt}\""
     max_compl_tokens =  max_tokens or DEFAULT_OPENAI_SETTINGS["max_compl_tokens"]
-    temperature = temperature or DEFAULT_OPENAI_SETTINGS["temperature"]
+    agent = agent or Agent(model="gpt-3.5-turbo", model_settings=ModelSettings(temperature=DEFAULT_OPENAI_SETTINGS["temperature"]))
 
     # Load the spacy model
     nlp = spacy.load("en_core_web_md")
@@ -1176,7 +1145,8 @@ def research(
         raise ValueError("No event question found in prompt.")
 
     # Get the tiktoken base encoding
-    enc = tiktoken.encoding_for_model(engine)
+    assert agent.model is not None
+    enc = tiktoken.encoding_for_model(agent.model if isinstance(agent.model, str) else agent.model.model_name)
 
     # Calculate the maximum number of tokens and words that can be consumed by the additional information string
     max_add_tokens = get_max_tokens_for_additional_information(
@@ -1189,9 +1159,7 @@ def research(
     # Fetch additional information
     additional_information = fetch_additional_information(
         event_question=event_question,
-        engine=engine,
-        temperature=0.5,
-        max_compl_tokens=max_compl_tokens,
+        agent=agent,
         nlp=nlp,
         max_add_words=max_add_words,
         embedding_model=embedding_model,
@@ -1215,26 +1183,18 @@ def research(
 def make_prediction(
     prompt: str,
     additional_information: str,
-    temperature: float = 0.7,
-    engine: str = "gpt-3.5-turbo-0125",
-    log_probs: bool = False,
-    top_logprobs: int = 5,
+    agent: Agent | None,
     include_reasoning: bool = False,
-    api_key: SecretStr | None = None,
 ) -> Prediction:
-    if api_key == None:
-        api_key = APIKeys().openai_api_key
+    agent = agent or Agent(model="gpt-3.5-turbo-0125", model_settings=ModelSettings(temperature=0.7))
     
     current_time_utc = datetime.now(timezone.utc)
     formatted_time_utc = current_time_utc.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-6] + "Z"
 
-    prediction_prompt = ChatPromptTemplate.from_template(template=PREDICTION_PROMPT)
-
-    llm = ChatOpenAI(model=engine, temperature=temperature, api_key=secretstr_to_v1_secretstr(api_key))
     field_descriptions = FIELDS_DESCRIPTIONS.copy()
     if not include_reasoning:
         field_descriptions.pop("reasoning")
-    formatted_messages = prediction_prompt.format_messages(
+    prediction_prompt = PREDICTION_PROMPT.format(
         user_prompt=prompt,
         additional_information=additional_information,
         n_fields=len(field_descriptions),
@@ -1242,26 +1202,9 @@ def make_prediction(
         fields_description=fields_dict_to_bullet_list(field_descriptions),
         timestamp=formatted_time_utc,
     )
-    generation = llm.generate([formatted_messages], logprobs=log_probs, top_logprobs=top_logprobs if log_probs else None, callbacks=[langfuse_context.get_current_langchain_handler()])
-
-    completion = generation.generations[0][0].text
-
-    # Get probability that is based on the token's top logprobs.
-    decision, probability = None, None
-    if log_probs:
-        for token in check_not_none(generation.generations[0][0].generation_info)["logprobs"]["content"]:  
-            # Check if the token is a decision token, we prompt the model for it to be there, so it is in 99% of cases.
-            if token["token"] in ("y", "n"):
-                decision = token["token"]
-                probability = math.exp(token["logprob"])
-                break
-
-        if decision is None or probability is None:
-            raise ValueError(f"No decision found in completion from {engine=}, {completion=}, {formatted_messages=}")
-
+    result = agent.run_sync(prediction_prompt)
+    completion = result.data
     response: Prediction = json.loads(clean_completion_json(completion))
-    response["decision"] = decision
-    response["decision_token_prob"] = probability
     
     return response
 

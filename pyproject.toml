@@ -8,7 +8,7 @@ readme = "README.md"
 [tool.poetry.dependencies]
 python = "~3.10"
 langchain = "^0.2.6"
-beautifulsoup4 = "^4.12.3"
+beautifulsoup4 = "^4,<4.13" # Bug in typing of newer version
 click = "^8.0.2"
 markdownify = "0.11.6"
 pandas = "^2.1.1"
@@ -30,12 +30,13 @@ scikit-learn = "^1.4.0"
 typer = ">=0.9.0,<1.0.0"
 types-requests = "^2.31.0.20240125"
 types-python-dateutil = "^2.9.0"
-prediction-market-agent-tooling = { version = ">=0.56.3,<1", extras = ["langchain", "google"] }
+prediction-market-agent-tooling = { version = ">=0.57.19,<1", extras = ["langchain", "google"] }
 langchain-community = "^0.2.6"
 memory-profiler = "^0.61.0"
 matplotlib = "^3.8.3"
 pyautogen = "^0.3.1"
 python-dateutil = "^2.9.0.post0"
+pydantic-ai = { version = ">=0.0.23,<0.1.0", extras = ["logfire"] }
 
 [tool.poetry.group.dev.dependencies]
 mypy = "^1.8.0"
